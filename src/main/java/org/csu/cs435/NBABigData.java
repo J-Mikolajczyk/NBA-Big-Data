@@ -7,6 +7,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.api.java.UDF2;
+import org.apache.spark.sql.api.java.UDF4;
 
 import java.util.Map;
 import java.util.HashMap;
@@ -82,7 +83,7 @@ public class NBABigData {
         df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("PCTIMESTRING").cast(DataTypes.StringType)));
 
         // we only want the last 5 minutes
-        df = df.filter(functions.col("SECONDS_REMAINING").geq(0).and(functions.col("SECONDS_REMAINING").leq(300)));
+        df = df.filter(functions.col("SECONDS_REMAINING").leq(300));
 
 
         // Handle SCOREMARGIN and filter by a diffence of 6
@@ -138,9 +139,26 @@ public class NBABigData {
         return minutes * 60 + seconds;
     }
 //this all probably needs to be fixed
-    public static String classifyEvent(Integer eventMsgType, Integer eventMsgActionType) {
-        // Implement logic to classify events into types like "Made 3-Point Shot"
+    public static String classifyEvent(Integer eventMsgType, Integer eventMsgActionType, String homeDescription, String awayDescription) {
         if (eventMsgType == null) return "Other";
+
+        // Detect assists in descriptions (look for key terms like "assist" in descriptions)
+        if ((homeDescription != null && homeDescription.contains("AST")) || 
+            (awayDescription != null && awayDescription.contains("AST"))) {
+            return "Assist";
+        }
+
+        // Detect STEAL and BLOCK actions
+        if ((homeDescription != null && homeDescription.contains("STEAL")) || 
+            (awayDescription != null && awayDescription.contains("STEAL"))) {
+            return "STEAL";
+        }
+
+        if ((homeDescription != null && homeDescription.contains("BLOCK")) || 
+            (awayDescription != null && awayDescription.contains("BLOCK"))) {
+            return "BLOCK";
+        }
+
         switch (eventMsgType) {
             case 1: // Made Shot
                 if (eventMsgActionType != null && isThreePointer(eventMsgActionType)) {
@@ -155,14 +173,12 @@ public class NBABigData {
                     return "Missed Field Goal";
                 }
             case 3: // Free Throw
-                // EVENTMSGACTIONTYPE codes for free throws can be used to determine made/missed
                 if (eventMsgActionType != null && isMadeFreeThrow(eventMsgActionType)) {
                     return "Made Free Throw";
                 } else {
                     return "Missed Free Throw";
                 }
             case 4: // Rebound
-                // I dont know if we should specifiy defensive or offensive rebounds
                 return "Rebound";
             case 5: // Turnover
                 return "Turnover";
@@ -186,13 +202,15 @@ public class NBABigData {
         return eWPAValues.getOrDefault(eventType, 0.0);
     }
 
-    private static Dataset<Row> calculateClutchness(Dataset<Row> df, SparkSession spark) {
+private static Dataset<Row> calculateClutchness(Dataset<Row> df, SparkSession spark) {
+        df = df.withColumn("HOMEDESCRIPTION", functions.coalesce(df.col("HOMEDESCRIPTION"), functions.lit(""))).withColumn("VISITORDESCRIPTION", functions.coalesce(df.col("VISITORDESCRIPTION"), functions.lit("")));
+
         // Register UDFs
-        spark.udf().register("classifyEvent", (UDF2<Integer, Integer, String>) NBABigData::classifyEvent, DataTypes.StringType);
+        spark.udf().register("classifyEvent", (UDF4<Integer, Integer, String, String, String>) NBABigData::classifyEvent, DataTypes.StringType);
         spark.udf().register("getEwpaValue", (UDF1<String, Double>) NBABigData::getEwpaValue, DataTypes.DoubleType);
 
         // Classify events
-        df = df.withColumn("EVENT_TYPE", functions.callUDF("classifyEvent", df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE")));
+        df = df.withColumn("EVENT_TYPE", functions.callUDF("classifyEvent", df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"), df.col("VISITORDESCRIPTION")));
 
         // Assign eWPA values
         df = df.withColumn("eWPA", functions.callUDF("getEwpaValue", df.col("EVENT_TYPE")));
