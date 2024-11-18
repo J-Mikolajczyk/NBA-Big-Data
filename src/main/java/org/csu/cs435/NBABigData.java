@@ -6,7 +6,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.api.java.UDF1;
-import org.apache.spark.sql.api.java.UDF5;
+import org.apache.spark.sql.api.java.UDF6;
 
 import java.util.Map;
 import java.util.HashMap;
@@ -41,6 +41,9 @@ public class NBABigData {
         eWPAValues.put("Missed Free Throw (Last 10 Seconds)", -0.030);
         eWPAValues.put("Missed Field Goal (Last 10 Seconds)", -0.032);
         eWPAValues.put("Turnover (Last 10 Seconds)", -0.042);
+
+        eWPAValues.put("Made 3-Point Shot (Clutch Margin)", 0.120);
+        eWPAValues.put("Made 2-Point Shot (Clutch Margin)", 0.060);
     }
     
 
@@ -151,10 +154,12 @@ public class NBABigData {
         return minutes * 60 + seconds;
     }
 //this all probably needs to be fixed
-    public static String classifyEvent(Integer eventMsgType, Integer eventMsgActionType, String homeDescription, String awayDescription, Integer secondsRemaining) {
+    public static String classifyEvent(
+            Integer eventMsgType, Integer eventMsgActionType, String homeDescription, String awayDescription, Integer secondsRemaining, Integer scoreMargin) {
+        
         if (eventMsgType == null) return "Other";
 
-        boolean isLast10Seconds = secondsRemaining != null && secondsRemaining <= 10;
+        boolean isLast10Seconds = secondsRemaining <= 10;
 
         // Detect assists in descriptions (look for key terms like "assist" in descriptions)
         if ((homeDescription != null && homeDescription.contains("AST")) || 
@@ -176,8 +181,14 @@ public class NBABigData {
         switch (eventMsgType) {
             case 1: // Made Shot
                 if (eventMsgActionType != null && isThreePointer(eventMsgActionType)) {
+                    if (isLast10Seconds && 3 > scoreMargin) {
+                        return "Made 3-Point Shot (Clutch Margin)";
+                    }
                     return isLast10Seconds ? "Made 3-Point Shot (Last 10 Seconds)" : "Made 3-Point Shot";
                 } else {
+                    if (isLast10Seconds && 2 > scoreMargin) {
+                        return "Made 2-Point Shot (Clutch Margin)";
+                    }
                     return isLast10Seconds ? "Made 2-Point Shot (Last 10 Seconds)" : "Made 2-Point Shot";
                 }
             case 2: // Missed Shot
@@ -221,11 +232,11 @@ public class NBABigData {
         df = df.withColumn("HOMEDESCRIPTION", functions.coalesce(df.col("HOMEDESCRIPTION"), functions.lit(""))).withColumn("VISITORDESCRIPTION", functions.coalesce(df.col("VISITORDESCRIPTION"), functions.lit("")));
 
         // Register UDFs
-        spark.udf().register("classifyEvent", (UDF5<Integer, Integer, String, String, Integer, String>) NBABigData::classifyEvent, DataTypes.StringType);
+        spark.udf().register("classifyEvent", (UDF6<Integer, Integer, String, String, Integer, Integer, String>) NBABigData::classifyEvent, DataTypes.StringType);
         spark.udf().register("getEwpaValue", (UDF1<String, Double>) NBABigData::getEwpaValue, DataTypes.DoubleType);
 
         // Classify events
-        df = df.withColumn("EVENT_TYPE", functions.callUDF("classifyEvent", df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"), df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING")));
+        df = df.withColumn("EVENT_TYPE", functions.callUDF("classifyEvent", df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"), df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING"), df.col("SCOREMARGIN_INT")));
 
         // Assign eWPA values
         df = df.withColumn("eWPA", functions.callUDF("getEwpaValue", df.col("EVENT_TYPE")));
