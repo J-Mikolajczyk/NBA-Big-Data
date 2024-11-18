@@ -79,10 +79,11 @@ public class NBABigData {
         spark.udf().register("timeStringToSeconds", (UDF1<String, Integer>) NBABigData::convertTimeStringToSeconds, DataTypes.IntegerType);
 
         //  PCTIMESTRING is the time on the clock as a String
-        df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("PCTIMESTRING")));
+        df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("PCTIMESTRING").cast(DataTypes.StringType)));
 
         // we only want the last 5 minutes
-        df = df.filter(functions.col("SECONDS_REMAINING").leq(300));
+        df = df.filter(functions.col("SECONDS_REMAINING").geq(0).and(functions.col("SECONDS_REMAINING").leq(300)));
+
 
         // Handle SCOREMARGIN and filter by a diffence of 6
         df = df.withColumn("SCOREMARGIN_INT", functions.when(
@@ -119,11 +120,11 @@ public class NBABigData {
 
     public static int convertTimeStringToSeconds(String timeString) {
         if (timeString == null || timeString.isEmpty()) {
-            return 0;
+            return -1;
         }
         String[] parts = timeString.split(":");
         if (parts.length != 2) {
-            return 0;
+            return -1;
         }
         int minutes = 0;
         int seconds = 0;
@@ -132,7 +133,7 @@ public class NBABigData {
             seconds = Integer.parseInt(parts[1]);
         } catch (NumberFormatException e) {
             // Handle exception if time string is not in expected format, i guess we just can drop the data point
-            return 0;
+            return -1;
         }
         return minutes * 60 + seconds;
     }
