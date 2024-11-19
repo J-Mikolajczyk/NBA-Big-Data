@@ -79,10 +79,17 @@ public class NBABigData {
     }
 
     private static Dataset<Row> readData(final SparkSession spark, final String filePath) {
-        return spark.read()
+        if (filePath.endsWith(".csv")) {
+            return spark.read()
                 .option("header", "true")
                 .option("inferSchema", "true")
                 .csv(filePath);
+        } else {
+            return spark.read()
+                .option("header", "true")
+                .option("inferSchema", "true")
+                .csv(filePath + "/*.csv");
+        }
     }
 
     private static Dataset<Row> preprocessData(Dataset<Row> df, SparkSession spark) {
