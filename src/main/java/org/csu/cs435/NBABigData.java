@@ -3,13 +3,13 @@ package org.csu.cs435;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF2;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.functions;
 import org.apache.spark.sql.api.java.UDF1;
-import org.apache.spark.sql.api.java.UDF6;
+import org.apache.spark.sql.api.java.UDF9;
+import java.util.*;
 
-import java.util.Map;
-import java.util.HashMap;
 
 public class NBABigData {
 
@@ -17,35 +17,33 @@ public class NBABigData {
     public static Map<String, Double> eWPAValues = new HashMap<>();
 
     static {
+        eWPAValues.put("Assist", 0.010);
         eWPAValues.put("Made 3-Point Shot", 0.040);
+        eWPAValues.put("Missed 3-Point Shot", -0.040);
         eWPAValues.put("Made 2-Point Shot", 0.020);
-        eWPAValues.put("Offensive Rebound", 0.016);
-        eWPAValues.put("Getting 1 Foul Shot", 0.016);
-        eWPAValues.put("Getting 2 Foul Shots", 0.010);
-        eWPAValues.put("Getting 3 Foul Shots", 0.027);
-        eWPAValues.put("Defensive Rebound", 0.007);
+        eWPAValues.put("Missed 2-Point Shot", -0.020);
         eWPAValues.put("Made Free Throw", 0.005);
         eWPAValues.put("Missed Free Throw", -0.015);
-        eWPAValues.put("Missed Field Goal", -0.016);
+        eWPAValues.put("Rebound", 0.0115); //I have failed to find a reliable way to determine if a rebound is O or D, so I just made rebound the average of the two. should barely make a difference I think
         eWPAValues.put("Turnover", -0.021);
-    
+        eWPAValues.put("STEAL" , .022);
+        eWPAValues.put("BLOCK" , .011); //remember to adjust this
         // Add under 10 seconds weights
-        eWPAValues.put("Made 3-Point Shot (Last 10 Seconds)", 0.080);
-        eWPAValues.put("Made 2-Point Shot (Last 10 Seconds)", 0.040);
-        eWPAValues.put("Offensive Rebound (Last 10 Seconds)", 0.032);
-        eWPAValues.put("Getting 1 Foul Shot (Last 10 Seconds)", 0.032);
-        eWPAValues.put("Getting 2 Foul Shots (Last 10 Seconds)", 0.020);
-        eWPAValues.put("Getting 3 Foul Shots (Last 10 Seconds)", 0.054);
-        eWPAValues.put("Defensive Rebound (Last 10 Seconds)", 0.014);
+        eWPAValues.put("Assist (Last 10 Seconds)", 0.020);
+        eWPAValues.put("Made 3-Point Shot (Last 10 Seconds)", 0.050);
+        eWPAValues.put("Made 2-Point Shot (Last 10 Seconds)", 0.030);
         eWPAValues.put("Made Free Throw (Last 10 Seconds)", 0.010);
         eWPAValues.put("Missed Free Throw (Last 10 Seconds)", -0.030);
-        eWPAValues.put("Missed Field Goal (Last 10 Seconds)", -0.032);
+        eWPAValues.put("Rebound (Last 10 Seconds)", 0.02);
         eWPAValues.put("Turnover (Last 10 Seconds)", -0.042);
-
-        eWPAValues.put("Made 3-Point Shot (Clutch Margin)", 0.120);
+        eWPAValues.put("STEAL (Last 10 Seconds)" , .044);
+        eWPAValues.put("BLOCK (Last 10 Seconds)" , .022);
+        eWPAValues.put("Made 3-Point Shot (Clutch Margin)", 0.10);
+        eWPAValues.put("Missed 3-Point Shot (Clutch Margin)", -0.10);
         eWPAValues.put("Made 2-Point Shot (Clutch Margin)", 0.060);
+        eWPAValues.put("Missed 2-point Shot (Clutch Margin)", -0.060);
     }
-    
+
 
     public static void main(String[] args) {
 
@@ -58,7 +56,7 @@ public class NBABigData {
 
         // Show first few rows of the preprocessed data
         System.out.println("Preprocessed Data Sample:");
-        preprocessedData.show(5);
+        preprocessedData.show(10);
 
         // Proceed with Clutchness Calculation
         Dataset<Row> clutchScores = calculateClutchness(preprocessedData, spark);
@@ -67,9 +65,19 @@ public class NBABigData {
         System.out.println("Top 10 Players by Adjusted Clutchness Score:");
         clutchScores.orderBy(functions.desc("Adjusted_eWPA")).show(10);
 
+        // Corrected grouping by PLAYER_ID and PLAYER_NAME
+        Dataset<Row> playerTotalClutchScores = clutchScores.groupBy("PLAYER_ID", "PLAYER_NAME")
+                .agg(functions.sum("Adjusted_eWPA").alias("Total_ClutchScore"));
+
+        // This aggregates all the seasons together for each player
+        // Show the top 10 players by total clutch score
+        System.out.println("Top 10 Players overall season Adjusted Clutchness Score:");
+        playerTotalClutchScores.orderBy(functions.desc("Total_ClutchScore")).show(10);
+
         // Optionally, save the results to a file
         // clutchScores.write().mode("overwrite").csv("clutch_scores.csv");
     }
+
 
     private static SparkSession createSparkSession() {
         return SparkSession.builder()
@@ -81,14 +89,14 @@ public class NBABigData {
     private static Dataset<Row> readData(final SparkSession spark, final String filePath) {
         if (filePath.endsWith(".csv")) {
             return spark.read()
-                .option("header", "true")
-                .option("inferSchema", "true")
-                .csv(filePath);
+                    .option("header", "true")
+                    .option("inferSchema", "true")
+                    .csv(filePath);
         } else {
             return spark.read()
-                .option("header", "true")
-                .option("inferSchema", "true")
-                .csv(filePath + "/*.csv");
+                    .option("header", "true")
+                    .option("inferSchema", "true")
+                    .csv(filePath + "/*.csv");
         }
     }
 
@@ -98,15 +106,33 @@ public class NBABigData {
 
         // Keep only 4th quarter and overtime periods, OT is period 5 so this should work
         df = filterByPeriod(df);
+        System.out.println("klefns;iklfn");
+        df.show(500);
+        System.out.println("rebos");
+        Dataset<Row> steals = df;
 
+
+        // Select the HOMEDESCRIPTION and VISITORDESCRIPTION columns
+        Dataset<Row> stealDescriptions = steals.select("HOMEDESCRIPTION", "VISITORDESCRIPTION", "EVENTMSGACTIONTYPE", "PLAYER1_NAME", "PLAYER2_NAME", "PLAYER3_NAME");
+        // Show the results
+        stealDescriptions.show(600, false); // Adjust the number of rows as needed
         // Register User defined function(UDF) so we can grab time on clock
-        spark.udf().register("timeStringToSeconds", (UDF1<String, Integer>) NBABigData::convertTimeStringToSeconds, DataTypes.IntegerType);
+        spark.udf().register("timeStringToSeconds", (UDF2<String, String, Integer>) NBABigData::convertTimeStringToSeconds, DataTypes.IntegerType);
 
-        //  PCTIMESTRING is the time on the clock as a String
-        df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("PCTIMESTRING").cast(DataTypes.StringType)));
+// Extract hours and minutes from PCTIMESTRING
+        df = df.withColumn("seconds_part", functions.minute(df.col("PCTIMESTRING")).cast(DataTypes.StringType));
+        df = df.withColumn("minutes_part", functions.hour(df.col("PCTIMESTRING")).cast(DataTypes.StringType));
+
+// PCTIMESTRING is the time on the clock as a String
+        df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("minutes_part"), df.col("seconds_part")));
+
 
         // we only want the last 5 minutes
-        df = df.filter(functions.col("SECONDS_REMAINING").leq(300));
+        functions.col("SECONDS_REMAINING").isNotNull()
+                .and(functions.col("SECONDS_REMAINING").geq(0))
+                .and(functions.col("SECONDS_REMAINING").leq(300));
+
+
 
         // Handle SCOREMARGIN and filter by a diffence of 6
         df = df.withColumn("SCOREMARGIN_INT", functions.when(
@@ -117,7 +143,7 @@ public class NBABigData {
 
         return df;
     }
-//I NEED TO TEST IF any of the below IS ACTUALLY BEHAVING CORRECTLY
+
     private static Dataset<Row> applySeasonType(Dataset<Row> df) {
         // Apply Season Type based on WEEK_OF_SEASON
         df = df.withColumn("SEASON_TYPE", functions.when(
@@ -141,94 +167,180 @@ public class NBABigData {
         return df;
     }
 
-    public static int convertTimeStringToSeconds(String timeString) {
-        if (timeString == null || timeString.isEmpty()) {
+    public static int convertTimeStringToSeconds(String minutes, String seconds) {
+        if (minutes == null || minutes.isEmpty() || seconds == null || seconds.isEmpty()) {
             return -1;
         }
-        String[] parts = timeString.split(":");
-        if (parts.length != 2) {
-            return -1;
-        }
-        int minutes = 0;
-        int seconds = 0;
         try {
-            minutes = Integer.parseInt(parts[0]);
-            seconds = Integer.parseInt(parts[1]);
+            int minutesInt = Integer.parseInt(minutes);
+            int secondsInt = Integer.parseInt(seconds);
+            return minutesInt * 60 + secondsInt;
         } catch (NumberFormatException e) {
-            // Handle exception if time string is not in expected format, i guess we just can drop the data point
             return -1;
         }
-        return minutes * 60 + seconds;
     }
-//this all probably needs to be fixed
-    public static String classifyEvent(
-            Integer eventMsgType, Integer eventMsgActionType, String homeDescription, String awayDescription, Integer secondsRemaining, Integer scoreMargin) {
-        
-        if (eventMsgType == null) return "Other";
 
-        boolean isLast10Seconds = secondsRemaining <= 10;
+    public static List<String> classifyEvent(Integer eventMsgType, Integer eventMsgActionType, String homeDescription,
+                                             String awayDescription, Integer secondsRemaining, Integer scoreMargin,
+                                             String player1Name, String player2Name, String player3Name) {
+        List<String> eventTypes = new ArrayList<>();
 
-        // Detect assists in descriptions (look for key terms like "assist" in descriptions)
-        if ((homeDescription != null && homeDescription.contains("AST")) || 
-            (awayDescription != null && awayDescription.contains("AST"))) {
-            return isLast10Seconds ? "Assist (Last 10 Seconds)" : "Assist";
+        if (eventMsgType == null) {
+            eventTypes.add("Other");
+            return eventTypes;
         }
 
-        // Detect STEAL and BLOCK actions
-        if ((homeDescription != null && homeDescription.contains("STEAL")) || 
-            (awayDescription != null && awayDescription.contains("STEAL"))) {
-            return isLast10Seconds ? "STEAL (Last 10 Seconds)" : "STEAL";
+        boolean isLast10Seconds = secondsRemaining != null && (secondsRemaining <= 10) && secondsRemaining > 0;
+        scoreMargin = scoreMargin != null ? scoreMargin : 0;
+        int absScoreMargin = Math.abs(scoreMargin);
+
+        // Normalize descriptions to uppercase for case-insensitive matching
+        if (homeDescription != null) homeDescription = homeDescription.toUpperCase();
+        if (awayDescription != null) awayDescription = awayDescription.toUpperCase();
+
+        // Detect assists
+        if (isAssist(homeDescription, awayDescription)) {
+            eventTypes.add(isLast10Seconds ? "Assist (Last 10 Seconds)" : "Assist");
         }
 
-        if ((homeDescription != null && homeDescription.contains("BLOCK")) || 
-            (awayDescription != null && awayDescription.contains("BLOCK"))) {
-            return isLast10Seconds ? "BLOCK (Last 10 Seconds)" : "BLOCK";
+        // Detect steals
+        if (isSteal(homeDescription, awayDescription)) {
+            eventTypes.add(isLast10Seconds ? "STEAL (Last 10 Seconds)" : "STEAL");
         }
 
-        switch (eventMsgType) {
-            case 1: // Made Shot
-                if (eventMsgActionType != null && isThreePointer(eventMsgActionType)) {
-                    if (isLast10Seconds && 3 > scoreMargin) {
-                        return "Made 3-Point Shot (Clutch Margin)";
+        // Detect blocks
+        if (isBlock(homeDescription, awayDescription)) {
+            eventTypes.add(isLast10Seconds ? "BLOCK (Last 10 Seconds)" : "BLOCK");
+        }
+
+        // Detect turnovers
+        if (isTurnover(homeDescription, awayDescription)) {
+            if (player1Name != null || player2Name != null || player3Name != null) {
+                eventTypes.add(isLast10Seconds ? "Turnover (Last 10 Seconds)" : "Turnover");
+            }
+        }
+
+        // Detect rebounds
+        if (isRebound(homeDescription, awayDescription)) {
+            if (player1Name != null || player2Name != null || player3Name != null) {
+                eventTypes.add(isLast10Seconds ? "Rebound (Last 10 Seconds)" : "Rebound");
+            }
+        }
+
+        // Detect shots (3-pointers and 2-pointers, made and missed)
+        if (eventMsgActionType != null) {
+            if (isThreePointer(homeDescription, awayDescription)) {
+                if (isMissedShot(homeDescription, awayDescription)) {
+                    eventTypes.add((isLast10Seconds && absScoreMargin <= 3) ? "Missed 3-Point Shot (Clutch Margin)" : "Missed 3-Point Shot");
+                } else {
+                    if (isLast10Seconds && absScoreMargin <= 3) {
+                        eventTypes.add("Made 3-Point Shot (Clutch Margin)");
+                    } else {
+                        eventTypes.add(isLast10Seconds ? "Made 3-Point Shot (Last 10 Seconds)" : "Made 3-Point Shot");
                     }
-                    return isLast10Seconds ? "Made 3-Point Shot (Last 10 Seconds)" : "Made 3-Point Shot";
+                }
+            } else if (isTwoPointer(homeDescription, awayDescription)) {
+                if (isMissedShot(homeDescription, awayDescription)) {
+                    eventTypes.add((isLast10Seconds && absScoreMargin <= 2) ? "Missed 2-Point Shot (Clutch Margin)" : "Missed 2-Point Shot");
                 } else {
-                    if (isLast10Seconds && 2 > scoreMargin) {
-                        return "Made 2-Point Shot (Clutch Margin)";
+                    if (isLast10Seconds && absScoreMargin <= 2) {
+                        eventTypes.add("Made 2-Point Shot (Clutch Margin)");
+                    } else {
+                        eventTypes.add(isLast10Seconds ? "Made 2-Point Shot (Last 10 Seconds)" : "Made 2-Point Shot");
                     }
-                    return isLast10Seconds ? "Made 2-Point Shot (Last 10 Seconds)" : "Made 2-Point Shot";
                 }
-            case 2: // Missed Shot
-                if (eventMsgActionType != null && isThreePointer(eventMsgActionType)) {
-                    return isLast10Seconds ? "Missed 3-Point Shot (Last 10 Seconds)" : "Missed 3-Point Shot";
-                } else {
-                    return isLast10Seconds ? "Missed Field Goal (Last 10 Seconds)" : "Missed Field Goal";
-                }
-            case 3: // Free Throw
-                if (eventMsgActionType != null && isMadeFreeThrow(eventMsgActionType)) {
-                    return isLast10Seconds ? "Made Free Throw (Last 10 Seconds)" : "Made Free Throw";
-                } else {
-                    return isLast10Seconds ? "Missed Free Throw (Last 10 Seconds)" : "Missed Free Throw";
-                }
-            case 4: // Rebound
-                return isLast10Seconds ? "Rebound (Last 10 Seconds)" : "Rebound";
-            case 5: // Turnover
-                return isLast10Seconds ? "Turnover (Last 10 Seconds)" : "Turnover";
-            default:
-                return "Other";
+            }
         }
+
+        // Detect free throws
+        if (isFreeThrow(homeDescription, awayDescription)) {
+            if (isMissedShot(homeDescription, awayDescription)) {
+                eventTypes.add(isLast10Seconds ? "Missed Free Throw (Last 10 Seconds)" : "Missed Free Throw");
+            } else {
+                eventTypes.add(isLast10Seconds ? "Made Free Throw (Last 10 Seconds)" : "Made Free Throw");
+            }
+        }
+
+        if (eventTypes.isEmpty()) {
+            eventTypes.add("Other");
+        }
+
+        return eventTypes;
     }
 
 
-    private static boolean isThreePointer(int eventMsgActionType) {
-        // List of action types corresponding to 3-point shots
-        return eventMsgActionType == 79 || eventMsgActionType == 80 || eventMsgActionType == 81 ||
-                eventMsgActionType == 82 || eventMsgActionType == 83;
+
+    //helper methods yay
+    private static boolean isThreePointer(String homeDescription, String visitorDescription) {
+        if (homeDescription != null && homeDescription.contains("3PT")) {
+            return true;
+        }
+        if (visitorDescription != null && visitorDescription.contains("3PT")) {
+            return true;
+        }
+        return false;
     }
 
-    private static boolean isMadeFreeThrow(int eventMsgActionType) {
+    private static boolean isTwoPointer(String homeDescription, String visitorDescription) {
+        if (homeDescription != null && !homeDescription.contains("3PT") && (homeDescription.contains("Dunk") || homeDescription.contains("Layup") || homeDescription.contains("Shot"))) {
+            return true;
+        }
+        if (visitorDescription != null && !visitorDescription.contains("3PT") && (visitorDescription.contains("Dunk") || visitorDescription.contains("Layup") || visitorDescription.contains("Shot"))) {
+            return true;
+        }
+        return false;
+    }
 
-        return eventMsgActionType == 10 || eventMsgActionType == 12 || eventMsgActionType == 15;
+    private static boolean isMissedShot(String homeDescription, String visitorDescription) {
+        if ((homeDescription != null && homeDescription.contains("MISS"))) {
+            return true;
+        }
+        if ((visitorDescription != null && visitorDescription.contains("MISS"))) {
+            return true;
+        }
+        return false;
+    }
+
+
+    private static boolean isFreeThrow(String homeDescription, String visitorDescription) {
+
+        if (homeDescription != null && homeDescription.contains("Free Throw")) {
+            return true;
+        }
+        if (visitorDescription != null && visitorDescription.contains("Free Throw")) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isRebound(String homeDescription, String visitorDescription) {
+        if (homeDescription != null && homeDescription.contains("REBOUND")) {
+            return true;
+        }
+        if (visitorDescription != null && visitorDescription.contains("REBOUND")) {
+            return true;
+        }
+        return false;
+    }
+
+    public static Boolean isTurnover(String homeDescription, String visitorDescription) {
+        return (homeDescription != null && homeDescription.contains("Turnover")) ||
+                (visitorDescription != null && visitorDescription.contains("Turnover"));
+    }
+
+    public static Boolean isAssist(String homeDescription, String visitorDescription) {
+        return (homeDescription != null && homeDescription.contains("AST")) ||
+                (visitorDescription != null && visitorDescription.contains("AST"));
+    }
+
+    public static Boolean isSteal(String homeDescription, String visitorDescription) {
+        return (homeDescription != null && homeDescription.contains("STEAL")) ||
+                (visitorDescription != null && visitorDescription.contains("STEAL"));
+    }
+
+    public static Boolean isBlock(String homeDescription, String visitorDescription) {
+        return (homeDescription != null && homeDescription.contains("BLOCK")) ||
+                (visitorDescription != null && visitorDescription.contains("BLOCK"));
     }
 
     public static double getEwpaValue(String eventType) {
@@ -236,20 +348,54 @@ public class NBABigData {
     }
 
     private static Dataset<Row> calculateClutchness(Dataset<Row> df, SparkSession spark) {
-        df = df.withColumn("HOMEDESCRIPTION", functions.coalesce(df.col("HOMEDESCRIPTION"), functions.lit(""))).withColumn("VISITORDESCRIPTION", functions.coalesce(df.col("VISITORDESCRIPTION"), functions.lit("")));
+        // Prepare descriptions
+        df = df.withColumn("HOMEDESCRIPTION", functions.coalesce(df.col("HOMEDESCRIPTION"), functions.lit("")))
+                .withColumn("VISITORDESCRIPTION", functions.coalesce(df.col("VISITORDESCRIPTION"), functions.lit("")));
 
         // Register UDFs
-        spark.udf().register("classifyEvent", (UDF6<Integer, Integer, String, String, Integer, Integer, String>) NBABigData::classifyEvent, DataTypes.StringType);
+        spark.udf().register("classifyEvent",
+                (UDF9<Integer, Integer, String, String, Integer, Integer, String, String, String, List<String>>) NBABigData::classifyEvent,
+                DataTypes.createArrayType(DataTypes.StringType));
         spark.udf().register("getEwpaValue", (UDF1<String, Double>) NBABigData::getEwpaValue, DataTypes.DoubleType);
 
-        // Classify events
-        df = df.withColumn("EVENT_TYPE", functions.callUDF("classifyEvent", df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"), df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING"), df.col("SCOREMARGIN_INT")));
+        // Classify events (returns an array of event types)
+        df = df.withColumn("EVENT_TYPES", functions.callUDF("classifyEvent",
+                df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"),
+                df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING"), df.col("SCOREMARGIN_INT"),
+                df.col("PLAYER1_NAME"), df.col("PLAYER2_NAME"), df.col("PLAYER3_NAME")));
 
-        // Assign eWPA values
+        // Explode EVENT_TYPES to create one row per event type
+        df = df.withColumn("EVENT_TYPE", functions.explode(df.col("EVENT_TYPES")));
+
+        // Assign eWPA values for each event type
         df = df.withColumn("eWPA", functions.callUDF("getEwpaValue", df.col("EVENT_TYPE")));
 
+        // Initialize eWPA columns for each player
+        df = df.withColumn("PLAYER1_eWPA", functions.lit(0.0))
+                .withColumn("PLAYER2_eWPA", functions.lit(0.0))
+                .withColumn("PLAYER3_eWPA", functions.lit(0.0));
+
+        // Assign eWPA to players based on event type and role
+        df = assignEwpaToPlayers(df);
+
+        // Create an array of structs containing PLAYER_ID, PLAYER_NAME, and eWPA
+        df = df.withColumn("players_eWPA", functions.array(
+                functions.struct(df.col("PLAYER1_ID").alias("PLAYER_ID"), df.col("PLAYER1_NAME").alias("PLAYER_NAME"), df.col("PLAYER1_eWPA").alias("eWPA")),
+                functions.struct(df.col("PLAYER2_ID").alias("PLAYER_ID"), df.col("PLAYER2_NAME").alias("PLAYER_NAME"), df.col("PLAYER2_eWPA").alias("eWPA")),
+                functions.struct(df.col("PLAYER3_ID").alias("PLAYER_ID"), df.col("PLAYER3_NAME").alias("PLAYER_NAME"), df.col("PLAYER3_eWPA").alias("eWPA"))
+        ));
+
+        // Explode the array to create one row per player per event
+        df = df.withColumn("player_eWPA", functions.explode(df.col("players_eWPA")));
+
+        // Select the relevant columns
+        df = df.select("SEASON_TYPE", "player_eWPA.PLAYER_ID", "player_eWPA.PLAYER_NAME", "player_eWPA.eWPA");
+
+        // Filter out null PLAYER_IDs and zero eWPA
+        df = df.filter(df.col("PLAYER_ID").isNotNull().and(df.col("eWPA").notEqual(0.0)));
+
         // Aggregate clutchness scores per player and season type
-        Dataset<Row> playerClutchScores = df.groupBy("PLAYER1_ID", "PLAYER1_NAME", "SEASON_TYPE")
+        Dataset<Row> playerClutchScores = df.groupBy("PLAYER_ID", "PLAYER_NAME", "SEASON_TYPE")
                 .agg(functions.sum("eWPA").alias("Total_eWPA"));
 
         // Adjust for game importance
@@ -261,8 +407,30 @@ public class NBABigData {
                 functions.col("SEASON_TYPE").equalTo("Finals"), functions.col("Total_eWPA").multiply(2.0)
         ).otherwise(functions.col("Total_eWPA")));
 
-        // Need to apply last ten second bonus
-
         return playerClutchScores;
     }
+
+    private static Dataset<Row> assignEwpaToPlayers(Dataset<Row> df) {
+        // Assign eWPA to PLAYER1 for shots, free throws, rebounds, and turnovers
+        df = df.withColumn("PLAYER1_eWPA", functions.when(
+                functions.col("EVENT_TYPE").rlike("^Made.*Shot.*|^Missed.*Shot.*|^Made Free Throw.*|^Missed Free Throw.*|^Rebound.*|^Turnover.*"),
+                df.col("eWPA")
+        ).otherwise(df.col("PLAYER1_eWPA")));
+
+        // Assign eWPA to PLAYER2 for assists and steals
+        df = df.withColumn("PLAYER2_eWPA", functions.when(
+                functions.col("EVENT_TYPE").rlike("^Assist.*|^STEAL.*"),
+                df.col("eWPA")
+        ).otherwise(df.col("PLAYER2_eWPA")));
+
+        // Assign eWPA to PLAYER3 for blocks
+        df = df.withColumn("PLAYER3_eWPA", functions.when(
+                functions.col("EVENT_TYPE").rlike("^BLOCK.*"),
+                df.col("eWPA")
+        ).otherwise(df.col("PLAYER3_eWPA")));
+
+        return df;
+    }
+
+
 }
