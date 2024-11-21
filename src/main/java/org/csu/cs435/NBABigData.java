@@ -25,7 +25,7 @@ public class NBABigData {
         eWPAValues.put("Missed 2-Point Shot", -0.014);
         eWPAValues.put("Made Free Throw", 0.005);
         eWPAValues.put("Missed Free Throw", -0.015);
-        eWPAValues.put("Rebound", 0.0115); //I have failed to find a reliable way to determine if a rebound is O or D, so I just made rebound the average of the two. should barely make a difference I think
+        eWPAValues.put("Rebound", 0.002); //I have failed to find a reliable way to determine if a rebound is O or D, so I just made rebound the average of the two. should barely make a difference I think
         eWPAValues.put("Turnover", -0.021);
         eWPAValues.put("STEAL" , .021);
         eWPAValues.put("BLOCK" , .011); //remember to adjust this
@@ -35,7 +35,7 @@ public class NBABigData {
         eWPAValues.put("Made 2-Point Shot (Last 10 Seconds)", 0.033);
         eWPAValues.put("Made Free Throw (Last 10 Seconds)", 0.010);
         eWPAValues.put("Missed Free Throw (Last 10 Seconds)", -0.030);
-        eWPAValues.put("Rebound (Last 10 Seconds)", 0.023);
+        eWPAValues.put("Rebound (Last 10 Seconds)", 0.004);
         eWPAValues.put("Turnover (Last 10 Seconds)", -0.042);
         eWPAValues.put("STEAL (Last 10 Seconds)" , .042);
         eWPAValues.put("BLOCK (Last 10 Seconds)" , .022);
