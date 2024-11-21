@@ -1,5 +1,4 @@
 package org.csu.cs435;
-
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
@@ -9,7 +8,9 @@ import org.apache.spark.sql.functions;
 import org.apache.spark.sql.api.java.UDF1;
 import org.apache.spark.sql.api.java.UDF9;
 import java.util.*;
-
+import static org.apache.spark.sql.functions.*;
+import org.apache.spark.sql.expressions.Window;
+import org.apache.spark.sql.expressions.WindowSpec;
 
 public class NBABigData {
 
@@ -54,10 +55,6 @@ public class NBABigData {
         // Preprocessing Steps
         Dataset<Row> preprocessedData = preprocessData(nbaPlayByPlay, spark);
 
-        // Show first few rows of the preprocessed data
-        System.out.println("Preprocessed Data Sample:");
-        preprocessedData.show(10);
-
         // Proceed with Clutchness Calculation
         Dataset<Row> clutchScores = calculateClutchness(preprocessedData, spark);
 
@@ -72,7 +69,7 @@ public class NBABigData {
         // This aggregates all the seasons together for each player
         // Show the top 10 players by total clutch score
         System.out.println("Top 10 Players overall season Adjusted Clutchness Score:");
-        playerTotalClutchScores.orderBy(functions.desc("Total_ClutchScore")).show(10);
+        playerTotalClutchScores.orderBy(functions.desc("Total_ClutchScore")).show(100);
 
         // Optionally, save the results to a file
         // clutchScores.write().mode("overwrite").csv("clutch_scores.csv");
@@ -106,40 +103,46 @@ public class NBABigData {
 
         // Keep only 4th quarter and overtime periods, OT is period 5 so this should work
         df = filterByPeriod(df);
-        System.out.println("klefns;iklfn");
-        df.show(500);
-        System.out.println("rebos");
-        Dataset<Row> steals = df;
 
-
-        // Select the HOMEDESCRIPTION and VISITORDESCRIPTION columns
-        Dataset<Row> stealDescriptions = steals.select("HOMEDESCRIPTION", "VISITORDESCRIPTION", "EVENTMSGACTIONTYPE", "PLAYER1_NAME", "PLAYER2_NAME", "PLAYER3_NAME");
-        // Show the results
-        stealDescriptions.show(600, false); // Adjust the number of rows as needed
         // Register User defined function(UDF) so we can grab time on clock
         spark.udf().register("timeStringToSeconds", (UDF2<String, String, Integer>) NBABigData::convertTimeStringToSeconds, DataTypes.IntegerType);
 
-// Extract hours and minutes from PCTIMESTRING
+    // Extract hours and minutes from PCTIMESTRING
         df = df.withColumn("seconds_part", functions.minute(df.col("PCTIMESTRING")).cast(DataTypes.StringType));
         df = df.withColumn("minutes_part", functions.hour(df.col("PCTIMESTRING")).cast(DataTypes.StringType));
 
-// PCTIMESTRING is the time on the clock as a String
+    // PCTIMESTRING is the time on the clock as a timestampobject
         df = df.withColumn("SECONDS_REMAINING", functions.callUDF("timeStringToSeconds", df.col("minutes_part"), df.col("seconds_part")));
 
+        // Replace "TIE" with 0 directly in the SCOREMARGIN column
+        df = df.withColumn("SCOREMARGIN",
+                when(col("SCOREMARGIN").equalTo("TIE"), lit(0))  // If SCOREMARGIN is "TIE", set it to 0
+                        .otherwise(col("SCOREMARGIN")) // Otherwise, keep the original value
+        );
+
+        // Convert SCOREMARGIN to Integer type
+        df = df.withColumn("SCOREMARGIN", col("SCOREMARGIN").cast(DataTypes.IntegerType));
+
+        // We need to partition by game ID and order by event num so we can forward propogate the stupid scoremargin
+        WindowSpec windowSpec = Window.partitionBy("GAME_ID")
+                .orderBy("EVENTNUM")
+                .rowsBetween(Window.unboundedPreceding(), Window.currentRow());
+
+        // Fill forward the last non-null SCOREMARGIN
+        df = df.withColumn("SCOREMARGIN_FFILLED", last(col("SCOREMARGIN"), true).over(windowSpec));
+
+        // Filter events where the score margin is within 6 points
+        df = df.filter(abs(col("SCOREMARGIN_FFILLED")).leq(6));
+
+        //replace SCOREMARGIN with the filled values and get rid of forward filled
+        df = df.withColumn("SCOREMARGIN", col("SCOREMARGIN_FFILLED")).drop("SCOREMARGIN_FFILLED");
 
         // we only want the last 5 minutes
-        functions.col("SECONDS_REMAINING").isNotNull()
-                .and(functions.col("SECONDS_REMAINING").geq(0))
-                .and(functions.col("SECONDS_REMAINING").leq(300));
-
-
-
-        // Handle SCOREMARGIN and filter by a diffence of 6
-        df = df.withColumn("SCOREMARGIN_INT", functions.when(
-                functions.col("SCOREMARGIN").equalTo("TIE"), 0
-        ).otherwise(functions.col("SCOREMARGIN").cast(DataTypes.IntegerType)));
-
-        df = df.filter(functions.abs(df.col("SCOREMARGIN_INT")).leq(6));
+        df= df.filter(
+                functions.col("SECONDS_REMAINING").isNotNull()
+                        .and(functions.col("SECONDS_REMAINING").geq(0))
+                        .and(functions.col("SECONDS_REMAINING").leq(300))
+        );
 
         return df;
     }
@@ -191,7 +194,7 @@ public class NBABigData {
         }
 
         boolean isLast10Seconds = secondsRemaining != null && (secondsRemaining <= 10) && secondsRemaining > 0;
-        scoreMargin = scoreMargin != null ? scoreMargin : 0;
+
         int absScoreMargin = Math.abs(scoreMargin);
 
         // Normalize descriptions to uppercase for case-insensitive matching
@@ -233,9 +236,11 @@ public class NBABigData {
                 if (isMissedShot(homeDescription, awayDescription)) {
                     eventTypes.add((isLast10Seconds && absScoreMargin <= 3) ? "Missed 3-Point Shot (Clutch Margin)" : "Missed 3-Point Shot");
                 } else {
-                    if (isLast10Seconds && absScoreMargin <= 3) {
+                    if (isLast10Seconds && homeDescription != null && scoreMargin <= 0 && absScoreMargin <= 3) {
                         eventTypes.add("Made 3-Point Shot (Clutch Margin)");
-                    } else {
+                    } else if(isLast10Seconds && homeDescription == null && scoreMargin >= 0 && absScoreMargin <= 3){
+                        eventTypes.add("Made 3-Point Shot (Clutch Margin)");
+                    }else {
                         eventTypes.add(isLast10Seconds ? "Made 3-Point Shot (Last 10 Seconds)" : "Made 3-Point Shot");
                     }
                 }
@@ -243,7 +248,7 @@ public class NBABigData {
                 if (isMissedShot(homeDescription, awayDescription)) {
                     eventTypes.add((isLast10Seconds && absScoreMargin <= 2) ? "Missed 2-Point Shot (Clutch Margin)" : "Missed 2-Point Shot");
                 } else {
-                    if (isLast10Seconds && absScoreMargin <= 2) {
+                    if ((isLast10Seconds && homeDescription != null && scoreMargin <= 0 && absScoreMargin <= 2) || isLast10Seconds && homeDescription == null && scoreMargin >= 0 && absScoreMargin <= 2) {
                         eventTypes.add("Made 2-Point Shot (Clutch Margin)");
                     } else {
                         eventTypes.add(isLast10Seconds ? "Made 2-Point Shot (Last 10 Seconds)" : "Made 2-Point Shot");
@@ -269,63 +274,37 @@ public class NBABigData {
     }
 
 
-
-    //helper methods yay
+//helpers, now with all caps
     private static boolean isThreePointer(String homeDescription, String visitorDescription) {
-        if (homeDescription != null && homeDescription.contains("3PT")) {
-            return true;
-        }
-        if (visitorDescription != null && visitorDescription.contains("3PT")) {
-            return true;
-        }
-        return false;
+        return (homeDescription != null && homeDescription.contains("3PT")) ||
+                (visitorDescription != null && visitorDescription.contains("3PT"));
     }
 
     private static boolean isTwoPointer(String homeDescription, String visitorDescription) {
-        if (homeDescription != null && !homeDescription.contains("3PT") && (homeDescription.contains("Dunk") || homeDescription.contains("Layup") || homeDescription.contains("Shot"))) {
-            return true;
-        }
-        if (visitorDescription != null && !visitorDescription.contains("3PT") && (visitorDescription.contains("Dunk") || visitorDescription.contains("Layup") || visitorDescription.contains("Shot"))) {
-            return true;
-        }
-        return false;
+        return ((homeDescription != null && !homeDescription.contains("3PT") &&
+                (homeDescription.contains("DUNK") || homeDescription.contains("LAYUP") || homeDescription.contains("SHOT"))) ||
+                (visitorDescription != null && !visitorDescription.contains("3PT") &&
+                        (visitorDescription.contains("DUNK") || visitorDescription.contains("LAYUP") || visitorDescription.contains("SHOT"))));
     }
 
     private static boolean isMissedShot(String homeDescription, String visitorDescription) {
-        if ((homeDescription != null && homeDescription.contains("MISS"))) {
-            return true;
-        }
-        if ((visitorDescription != null && visitorDescription.contains("MISS"))) {
-            return true;
-        }
-        return false;
+        return (homeDescription != null && homeDescription.contains("MISS")) ||
+                (visitorDescription != null && visitorDescription.contains("MISS"));
     }
 
-
     private static boolean isFreeThrow(String homeDescription, String visitorDescription) {
-
-        if (homeDescription != null && homeDescription.contains("Free Throw")) {
-            return true;
-        }
-        if (visitorDescription != null && visitorDescription.contains("Free Throw")) {
-            return true;
-        }
-        return false;
+        return (homeDescription != null && homeDescription.contains("FREE THROW")) ||
+                (visitorDescription != null && visitorDescription.contains("FREE THROW"));
     }
 
     private static boolean isRebound(String homeDescription, String visitorDescription) {
-        if (homeDescription != null && homeDescription.contains("REBOUND")) {
-            return true;
-        }
-        if (visitorDescription != null && visitorDescription.contains("REBOUND")) {
-            return true;
-        }
-        return false;
+        return (homeDescription != null && homeDescription.contains("REBOUND")) ||
+                (visitorDescription != null && visitorDescription.contains("REBOUND"));
     }
 
     public static Boolean isTurnover(String homeDescription, String visitorDescription) {
-        return (homeDescription != null && homeDescription.contains("Turnover")) ||
-                (visitorDescription != null && visitorDescription.contains("Turnover"));
+        return (homeDescription != null && homeDescription.contains("TURNOVER")) ||
+                (visitorDescription != null && visitorDescription.contains("TURNOVER"));
     }
 
     public static Boolean isAssist(String homeDescription, String visitorDescription) {
@@ -342,6 +321,8 @@ public class NBABigData {
         return (homeDescription != null && homeDescription.contains("BLOCK")) ||
                 (visitorDescription != null && visitorDescription.contains("BLOCK"));
     }
+
+
 
     public static double getEwpaValue(String eventType) {
         return eWPAValues.getOrDefault(eventType, 0.0);
@@ -361,7 +342,7 @@ public class NBABigData {
         // Classify events (returns an array of event types)
         df = df.withColumn("EVENT_TYPES", functions.callUDF("classifyEvent",
                 df.col("EVENTMSGTYPE"), df.col("EVENTMSGACTIONTYPE"), df.col("HOMEDESCRIPTION"),
-                df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING"), df.col("SCOREMARGIN_INT"),
+                df.col("VISITORDESCRIPTION"), df.col("SECONDS_REMAINING"), df.col("SCOREMARGIN"),
                 df.col("PLAYER1_NAME"), df.col("PLAYER2_NAME"), df.col("PLAYER3_NAME")));
 
         // Explode EVENT_TYPES to create one row per event type
@@ -388,6 +369,20 @@ public class NBABigData {
         // Explode the array to create one row per player per event
         df = df.withColumn("player_eWPA", functions.explode(df.col("players_eWPA")));
 
+        Dataset<Row> playerData = df.select(
+                "SEASON_TYPE",
+                "player_eWPA.PLAYER_ID",
+                "player_eWPA.PLAYER_NAME",
+                "player_eWPA.eWPA",
+                "EVENT_TYPE",
+                "HOMEDESCRIPTION",
+                "VISITORDESCRIPTION",
+                "SECONDS_REMAINING",
+                "SCOREMARGIN"
+        );
+        String playerName = "John Stockton"; //change this line for the player you want to see
+        Dataset<Row> playerEvents = playerData.filter(col("PLAYER_NAME").equalTo(playerName));
+        playerEvents.show(100, false);
         // Select the relevant columns
         df = df.select("SEASON_TYPE", "player_eWPA.PLAYER_ID", "player_eWPA.PLAYER_NAME", "player_eWPA.eWPA");
 
