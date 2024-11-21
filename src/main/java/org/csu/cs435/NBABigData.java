@@ -66,6 +66,7 @@ public class NBABigData {
         Dataset<Row> playerTotalClutchScores = clutchScores.groupBy("PLAYER_ID", "PLAYER_NAME")
                 .agg(functions.sum("Adjusted_eWPA").alias("Total_ClutchScore"));
 
+        playerTotalClutchScores = playerTotalClutchScores.filter(col("PLAYER_NAME").isNotNull());
         // This aggregates all the seasons together for each player
         // Show the top 10 players by total clutch score
         System.out.println("Top 10 Players overall season Adjusted Clutchness Score:");
