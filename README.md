@@ -1,78 +1,95 @@
-# Motion Detection and Video Recording with Raspberry Pi
+# NBA Clutchness Analyzer
 
-This project enables a Raspberry Pi to detect motion using a PIR sensor and record a short video clip using a connected USB webcam. It's written in C, uses the WiringPi library for GPIO handling, and leverages `ffmpeg` to handle video recording. Videos are saved with a timestamped filename in the same directory as the executable.
+This project is a Java + Apache Spark application that analyzes NBA play-by-play data to calculate player "Clutchness" during high-stakes game moments using an expected Win Probability Added (eWPA) model.
 
-## Features
+## Overview
 
-- Motion detection using GPIO input
-- Automatic video recording with timestamped filenames
-- Uses `ffmpeg` to capture video from `/dev/video0`
-- Saves videos in `.mp4` format silently (no console clutter)
-
-## Requirements
-
-### Hardware
-
-- Raspberry Pi running Linux (e.g., Raspberry Pi OS)
-- PIR motion sensor connected to GPIO (see `GPIOwiring.jpg`)
-- USB webcam connected (recognized as `/dev/video0`)
-
-### Software
-
-- [WiringPi](http://wiringpi.com/download-and-install/)
-- [ffmpeg](https://ffmpeg.org/)
-
-To install `ffmpeg`:
-
-```bash
-sudo apt-get update
-sudo apt-get install ffmpeg
-```
-
-## Installation
-
-1. **Clone the repository**
-
-```bash
-git clone https://github.com/yourusername/motion-detection-pi.git
-cd motion-detection-pi
-```
-
-2. **Compile the C program**
-
-```bash
-gcc -o motion_detection motion_detection.c -lwiringPi
-```
-
-3. **Run the program (requires root access for GPIO)**
-
-```bash
-sudo ./motion_detection
-```
+This program:
+- Parses play-by-play CSVs.
+- Filters for clutch-time events: last 5 minutes of the 4th quarter or any overtime, with score margin ≤ 6.
+- Classifies each event (e.g., "Made 3-Point Shot", "Turnover").
+- Assigns eWPA values to each event, increasing weight for late-game or clutch-moment plays.
+- Aggregates clutchness scores per player.
+- Adjusts scores based on game importance (Regular Season, Playoffs, Finals).
 
 ## How It Works
 
-- Continuously checks the GPIO pin connected to the PIR sensor.
-- When motion is detected:
-  - Generates a timestamp
-  - Uses `ffmpeg` to record a short video (50 frames at 30 fps)
-  - Saves the video using the timestamp as the filename (e.g., `2025-06-26@10:42:31.mp4`)
+### Event Classification
+Events are classified using descriptive strings (`HOMEDESCRIPTION`, `VISITORDESCRIPTION`) and event codes. Examples:
+- **Made 3-Point Shot (Clutch Margin)**: +0.100 eWPA
+- **Missed Free Throw (Last 10 Seconds)**: -0.030 eWPA
+- **STEAL**: +0.021 eWPA
+- **BLOCK (Last 10 Seconds)**: +0.022 eWPA
 
-## Example Output
+### Clutchness Filtering
+Only keeps events where:
+- `PERIOD >= 4`
+- `SECONDS_REMAINING <= 300` (last 5 minutes)
+- `SCOREMARGIN` is between -6 and +6
 
+### Score Adjustment
+- Regular Season: x1
+- Playoffs: x1.5
+- Finals: x2
+
+### Aggregation
+Each event's eWPA is assigned to relevant players:
+- Scorer (PLAYER1), Assister (PLAYER2), Blocker (PLAYER3)
+- Exploded into individual rows per player for aggregation
+
+### Output
+Prints top 10 players by:
+- Game-by-game adjusted clutchness score
+- Overall clutchness score across all games
+
+## Example Use
+
+To run with a CSV:
+
+```bash
+spark-submit --class org.csu.cs435.NBABigData target/NBABigData-1.0.jar /path/to/playbyplay.csv
 ```
-Program is starting ...
-Motion detected: Recording video for 10 seconds...
-Video saved as 2025-06-26@10:42:31.mp4
-```
+Output will show the top clutch performers, and optionally logs clutchness events for a specific player (default is John Stockton).
 
-## Configuration Notes
+## Project Structure
+`main():` Sets up Spark session, loads data, processes, calculates scores.
 
-- The resolution is set to `1280x1720`. You can modify this in the source code to fit your camera.
-- Uses MJPEG encoding with quality level `-q:v 2` (high quality).
-- Output is silenced using `> /dev/null 2>&1`.
-- A 10-second delay follows each recording to avoid duplicate triggers.
+`preprocessData():` Filters events by time/score and fills missing margins.
 
-## License
+`classifyEvent():` Tags each event with one or more human-readable labels.
 
-This project is provided under the MIT License. See `LICENSE` for details.
+`getEwpaValue():` Maps label to a numeric impact value.
+
+`calculateClutchness():` Applies eWPA and adjusts for context.
+
+`assignEwpaToPlayers():` Allocates impact values to player columns.
+
+### Input Schema Expectations
+| Column Name	| Description |
+| ----------- | ----------- |
+| GAME_ID	    | Unique game ID |
+| EVENTMSGTYPE	 | Main event type code |
+| EVENTMSGACTIONTYPE	 | Subtype code |
+| HOMEDESCRIPTION	 | Description of event for home team |
+| VISITORDESCRIPTION	 | Description of event for away team |
+| PLAYER1_NAME	 | Primary player involved |
+| PLAYER2_NAME	 | Secondary player (e.g. assister) |
+| PLAYER3_NAME	 | Tertiary player (e.g. blocker) |
+| PCTIMESTRING	 | Game clock at time of event (MM:SS) |
+| PERIOD	 | Period number (4 for 4Q, 5+ for OT) |
+| SCOREMARGIN	 | Current point differential |
+
+## Configuration
+To target a different player in debug output, change the playerName variable in calculateClutchness().
+
+## Limitations
+Blocks and rebounds are approximated due to data granularity.
+
+Some edge cases (e.g., simultaneous player involvement) may underreport.
+
+Uses forward-fill for missing SCOREMARGIN values.
+
+## License & Credits
+Developed as part of the course CS 435 - Big Data at Colorado State University.
+
+No official affiliation with the NBA or any data providers.
